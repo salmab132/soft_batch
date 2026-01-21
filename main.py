@@ -15,6 +15,7 @@ from notion import get_brand_docs
 from llm import generate_social_post, generate_article_comments
 from mastodon_client import get_mastodon_client, post_to_mastodon
 from articles import get_top_baking_articles
+from replicate_client import generate_image
 
 if load_dotenv:
     load_dotenv()
@@ -30,13 +31,29 @@ def run_post_flow():
     print(post)
     print("\n===========================================\n")
 
-    # ✅ HUMAN-IN-THE-LOOP APPROVAL
+    # Optional: generate an image to attach
+    media_path = None
+    try:
+        make_image = input("Generate an image with Replicate to attach? (y/n): ").strip().lower()
+        if make_image == "y":
+            prompt = input("Image prompt (press Enter to use the post text): ").strip()
+            if not prompt:
+                prompt = post
+            print("🎨 Generating image...")
+            img = generate_image(prompt=prompt, output_format="png")
+            media_path = img.path
+            print(f"🖼️ Image saved: {media_path}")
+    except Exception as e:
+        print(f"⚠️ Image generation failed (will continue without image): {e}")
+        media_path = None
+
+    # ✅ HUMAN-IN-THE-LOOP APPROVAL (final gate)
     approve = input("Post this to Mastodon? (y/n): ").strip().lower()
 
     if approve == "y":
         print("🚀 Posting...")
         mastodon = get_mastodon_client()
-        post_to_mastodon(mastodon, post)
+        post_to_mastodon(mastodon, post, media_path=media_path, alt_text="AI-generated bakery illustration")
         print("✅ Posted successfully!")
     else:
         print("❌ Post discarded.")

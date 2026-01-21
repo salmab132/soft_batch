@@ -19,8 +19,8 @@ def get_mastodon_client():
     except Exception as e:
         raise RuntimeError(f"Failed to create Mastodon client: {str(e)}") from e
 
-def post_to_mastodon(client, text):
-    """Posts text to Mastodon. Raises exception on failure."""
+def post_to_mastodon(client, text, *, media_path: str | None = None, alt_text: str | None = None):
+    """Posts text to Mastodon (optionally with an attached image). Raises exception on failure."""
     if not client:
         raise ValueError("Mastodon client is required")
     if not text or not text.strip():
@@ -28,7 +28,17 @@ def post_to_mastodon(client, text):
 
     try:
         post_text = text + "\n\n🤖 AI-generated content"
-        result = client.status_post(post_text)
+
+        media_ids = None
+        if media_path:
+            # Upload media first, then attach it to the status.
+            media = client.media_post(media_path, description=alt_text)
+            media_id = media.get("id") if isinstance(media, dict) else getattr(media, "id", None)
+            if not media_id:
+                raise RuntimeError("Failed to upload media (no media id returned)")
+            media_ids = [media_id]
+
+        result = client.status_post(post_text, media_ids=media_ids)
         return result
     except MastodonError as e:
         raise RuntimeError(f"Mastodon API error: {str(e)}") from e
