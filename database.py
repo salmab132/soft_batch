@@ -138,6 +138,60 @@ CREATE INDEX IF NOT EXISTS idx_queue_priority ON posting_queue(priority DESC);
 CREATE INDEX IF NOT EXISTS idx_metrics_type ON metrics(metric_type);
 CREATE INDEX IF NOT EXISTS idx_metrics_created_at ON metrics(created_at DESC);
 
+-- Document chunks table for RAG system
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,  -- e.g., notion_page_id, article_id
+    source_type TEXT NOT NULL,  -- e.g., 'notion', 'article', 'brand_doc'
+    chunk_text TEXT NOT NULL,
+    chunk_number INTEGER NOT NULL,
+    chunk_strategy TEXT,  -- 'fixed_chars', 'paragraphs', 'sentences', 'hybrid'
+    embedding BLOB,  -- Stored as binary blob (pickled numpy array)
+    metadata TEXT,  -- JSON string for additional metadata
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Notion documents table
+CREATE TABLE IF NOT EXISTS notion_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notion_page_id TEXT NOT NULL UNIQUE,
+    title TEXT,
+    content TEXT NOT NULL,
+    last_synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Mastodon interactions table (for tracking comments/mentions)
+CREATE TABLE IF NOT EXISTS mastodon_interactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mastodon_id TEXT NOT NULL UNIQUE,  -- The ID of the toot/comment
+    interaction_type TEXT NOT NULL,  -- 'mention', 'reply', 'comment'
+    author_account TEXT NOT NULL,  -- Who posted it
+    content TEXT NOT NULL,
+    in_reply_to_id TEXT,  -- If this is a reply
+    our_post_id INTEGER,  -- Link to our post if this is a comment on our content
+    responded BOOLEAN NOT NULL DEFAULT 0,
+    response_post_id INTEGER,  -- Our response post ID
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT,
+    
+    FOREIGN KEY (our_post_id) REFERENCES posts(id) ON DELETE SET NULL,
+    FOREIGN KEY (response_post_id) REFERENCES posts(id) ON DELETE SET NULL
+);
+
+-- Indices for new tables
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON document_chunks(source_id, source_type);
+CREATE INDEX IF NOT EXISTS idx_chunks_created_at ON document_chunks(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_notion_page_id ON notion_documents(notion_page_id);
+CREATE INDEX IF NOT EXISTS idx_notion_synced ON notion_documents(last_synced_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mastodon_interactions_type ON mastodon_interactions(interaction_type);
+CREATE INDEX IF NOT EXISTS idx_mastodon_interactions_responded ON mastodon_interactions(responded);
+CREATE INDEX IF NOT EXISTS idx_mastodon_interactions_created ON mastodon_interactions(created_at DESC);
+
 -- Views for common queries
 CREATE VIEW IF NOT EXISTS v_recent_posts AS
 SELECT
@@ -363,6 +417,126 @@ def log_metric(metric_type: str, metric_value: Optional[float] = None,
             INSERT INTO metrics (metric_type, metric_value, metadata)
             VALUES (?, ?, ?)
         """, (metric_type, metric_value, metadata))
+
+
+def save_notion_document(notion_page_id: str, title: str, content: str,
+                         db_path: str = DEFAULT_DB_PATH) -> int:
+    """
+    Save or update a Notion document. Returns document ID.
+    """
+    with get_db(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Check if document exists
+        cursor.execute("SELECT id FROM notion_documents WHERE notion_page_id = ?", (notion_page_id,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update existing document
+            cursor.execute("""
+                UPDATE notion_documents
+                SET title = ?, content = ?, updated_at = datetime('now'), last_synced_at = datetime('now')
+                WHERE id = ?
+            """, (title, content, existing["id"]))
+            return existing["id"]
+        else:
+            # Insert new document
+            cursor.execute("""
+                INSERT INTO notion_documents (notion_page_id, title, content)
+                VALUES (?, ?, ?)
+            """, (notion_page_id, title, content))
+            return cursor.lastrowid
+
+
+def save_document_chunk(source_id: str, source_type: str, chunk_text: str,
+                       chunk_number: int, chunk_strategy: str,
+                       embedding: Optional[bytes] = None,
+                       metadata: Optional[str] = None,
+                       db_path: str = DEFAULT_DB_PATH) -> int:
+    """
+    Save a document chunk with optional embedding. Returns chunk ID.
+    """
+    with get_db(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO document_chunks
+            (source_id, source_type, chunk_text, chunk_number, chunk_strategy, embedding, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (source_id, source_type, chunk_text, chunk_number, chunk_strategy, embedding, metadata))
+        return cursor.lastrowid
+
+
+def get_document_chunks(source_id: str, source_type: str,
+                       db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """
+    Get all chunks for a specific document.
+    """
+    with get_db(db_path) as conn:
+        rows = conn.execute("""
+            SELECT id, chunk_text, chunk_number, chunk_strategy, metadata
+            FROM document_chunks
+            WHERE source_id = ? AND source_type = ?
+            ORDER BY chunk_number
+        """, (source_id, source_type)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def save_mastodon_interaction(mastodon_id: str, interaction_type: str,
+                              author_account: str, content: str,
+                              in_reply_to_id: Optional[str] = None,
+                              our_post_id: Optional[int] = None,
+                              db_path: str = DEFAULT_DB_PATH) -> int:
+    """
+    Save a Mastodon interaction (mention, reply, comment). Returns interaction ID.
+    """
+    with get_db(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Check if interaction already exists
+        cursor.execute("SELECT id FROM mastodon_interactions WHERE mastodon_id = ?", (mastodon_id,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            return existing["id"]
+        
+        cursor.execute("""
+            INSERT INTO mastodon_interactions
+            (mastodon_id, interaction_type, author_account, content, in_reply_to_id, our_post_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (mastodon_id, interaction_type, author_account, content, in_reply_to_id, our_post_id))
+        return cursor.lastrowid
+
+
+def get_unresponded_interactions(limit: int = 10,
+                                 db_path: str = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """
+    Get Mastodon interactions that haven't been responded to yet.
+    """
+    with get_db(db_path) as conn:
+        rows = conn.execute("""
+            SELECT id, mastodon_id, interaction_type, author_account, content,
+                   in_reply_to_id, our_post_id, created_at
+            FROM mastodon_interactions
+            WHERE responded = 0
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+def mark_interaction_responded(interaction_id: int, response_post_id: Optional[int] = None,
+                               db_path: str = DEFAULT_DB_PATH) -> None:
+    """
+    Mark a Mastodon interaction as responded.
+    """
+    with get_db(db_path) as conn:
+        conn.execute("""
+            UPDATE mastodon_interactions
+            SET responded = 1,
+                processed_at = datetime('now'),
+                response_post_id = ?
+            WHERE id = ?
+        """, (response_post_id, interaction_id))
 
 
 def get_stats(db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:

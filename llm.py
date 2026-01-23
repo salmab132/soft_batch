@@ -37,17 +37,41 @@ class ArticleComments(BaseModel):
 class ArticleCommentsResult(BaseModel):
     items: List[ArticleComments]
 
-def generate_social_post(brand_docs):
+def generate_social_post(brand_docs, use_rag: bool = False, rag_query: Optional[str] = None):
     """
     Uses brand docs to generate a single social media post.
+    
+    Args:
+        brand_docs: Brand documentation text
+        use_rag: Whether to use RAG retrieval for context
+        rag_query: Query for RAG retrieval (if None, uses a default)
+    
+    Returns:
+        Generated social media post text
     """
     client = _get_client()
+    
+    # Build context with RAG if enabled
+    context = brand_docs
+    if use_rag:
+        try:
+            from rag import build_rag_context
+            
+            # Default query if none provided
+            if not rag_query:
+                rag_query = "What are our bakery's key values, specialties, and brand voice?"
+            
+            rag_context = build_rag_context(rag_query, top_k=3)
+            if rag_context:
+                context = f"{rag_context}\n\n--- Full Brand Docs ---\n{brand_docs}"
+        except Exception as e:
+            print(f"Warning: RAG retrieval failed, using full docs: {e}")
 
     prompt = f"""
         You are the social media manager for a bakery called Soft Batch.
 
         Brand documentation:
-        {brand_docs}
+        {context}
 
         Write ONE short social media post.
         Tone: warm, artisanal, cozy, modern bakery.
@@ -60,6 +84,65 @@ def generate_social_post(brand_docs):
         max_tokens=500,  # Limit tokens for a short social media post
     )
 
+    return response.choices[0].message.content.strip()
+
+
+def generate_comment_reply(
+    original_comment: str,
+    brand_docs: str,
+    use_rag: bool = True
+) -> str:
+    """
+    Generate a reply to a comment/mention on Mastodon.
+    
+    Args:
+        original_comment: The comment we're replying to
+        brand_docs: Brand documentation
+        use_rag: Whether to use RAG for context
+        
+    Returns:
+        Generated reply text
+    """
+    client = _get_client()
+    
+    # Build context with RAG if enabled
+    context = brand_docs
+    if use_rag:
+        try:
+            from rag import build_rag_context
+            
+            # Use the comment itself as the query to find relevant context
+            rag_context = build_rag_context(original_comment, top_k=2)
+            if rag_context:
+                context = f"{rag_context}\n\n--- Additional Context ---\n{brand_docs[:500]}"
+        except Exception as e:
+            print(f"Warning: RAG retrieval failed: {e}")
+    
+    prompt = f"""
+You are the social media manager for Soft Batch, a modern artisanal bakery.
+
+Brand context:
+{context}
+
+Someone commented on our post:
+"{original_comment}"
+
+Write a friendly, helpful reply that:
+- Stays true to our warm, cozy, artisanal brand voice
+- Is genuinely helpful and authentic (not salesy)
+- Keeps it brief (under 280 characters)
+- No hashtags or emojis
+- Be conversational and human
+
+Reply:
+""".strip()
+    
+    response = client.chat.completions.create(
+        model="z-ai/glm-4.5-air",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200,
+    )
+    
     return response.choices[0].message.content.strip()
 
 
