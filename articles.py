@@ -133,4 +133,3 @@ def get_top_baking_articles(*, limit: int = 5) -> list[Article]:
 
     all_articles.sort(key=sort_key, reverse=True)
     return all_articles[:limit]
-

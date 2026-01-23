@@ -1,3 +1,5 @@
 .env
 __pycache__/
 outputs/
+*.db
+*.db.backup_*

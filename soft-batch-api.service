@@ -1,0 +1,24 @@
+[Unit]
+Description=Soft Batch FastAPI Service
+After=network.target
+
+[Service]
+Type=simple
+User=salma
+WorkingDirectory=/home/salma
+Environment="PATH=/home/salma/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/python3 -m uvicorn api:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soft-batch-api
+
+[Install]
+WantedBy=multi-user.target

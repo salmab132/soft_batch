@@ -5,3 +5,5 @@ pydantic
 Mastodon.py
 feedparser
 replicate
+fastapi
+uvicorn[standard]
